@@ -1,0 +1,14 @@
+{
+  "repo_url": "https://github.com/your-username/your-repo.git",
+  "branch": "main",
+  "username": "",
+  "github_token": "ghp_your_github_personal_access_token_here",
+  "display_name": "Your Display Name",
+  "is_authorized": false,
+  "last_save": null,
+  "current_save": null,
+  "has_temp_stash": false,
+  "autoSaveEnabled": false,
+  "autoSaveInterval": 30,
+  "autoSaveTargetTag": ""
+} 

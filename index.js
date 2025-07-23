@@ -45,6 +45,7 @@ const info = {
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const DATA_DIR = path.join(process.cwd(), 'data');
+const GIT_CONFIG_PATH = path.join(process.cwd(), '.git', 'git_autosave_config.json');
 const DEFAULT_BRANCH = 'main';
 
 const DEFAULT_CONFIG = {
@@ -83,6 +84,34 @@ async function readConfig() {
 
 async function saveConfig(config) {
     await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+async function readGitConfig() {
+    try {
+        const data = await fs.readFile(GIT_CONFIG_PATH, 'utf8');
+        const gitConfig = JSON.parse(data);
+        
+        // Validate required fields
+        if (!gitConfig.repo_url || !gitConfig.github_token) {
+            console.log('[cloud-saves] Git config missing required fields (repo_url, github_token)');
+            return null;
+        }
+        
+        // Set default branch if not specified
+        if (!gitConfig.branch) {
+            gitConfig.branch = DEFAULT_BRANCH;
+        }
+        
+        console.log(`[cloud-saves] Valid git config found: repo=${gitConfig.repo_url}, branch=${gitConfig.branch}`);
+        return gitConfig;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            console.log('[cloud-saves] No git config file found at:', GIT_CONFIG_PATH);
+        } else {
+            console.warn('[cloud-saves] Failed to read or parse git config:', error.message);
+        }
+        return null;
+    }
 }
 
 async function getGitInstance(cwd = DATA_DIR) {
@@ -1088,11 +1117,142 @@ function setupBackendAutoSaveTimer() {
     });
 }
 
+async function checkAndAutoConfigureRemote() {
+    try {
+        console.log('[cloud-saves] 检查是否需要自动配置远程仓库...');
+        
+        // First try to read from GIT_CONFIG_PATH
+        const gitConfig = await readGitConfig();
+        let config = await readConfig();
+        
+        if (gitConfig) {
+            console.log('[cloud-saves] 使用 GIT_CONFIG_PATH 中的配置进行自动配置...');
+            // Merge git config into main config
+            config.repo_url = gitConfig.repo_url;
+            config.github_token = gitConfig.github_token;
+            config.branch = gitConfig.branch || DEFAULT_BRANCH;
+            
+            // Extract display name from repo URL if not provided
+            if (!config.display_name && gitConfig.repo_url) {
+                const match = gitConfig.repo_url.match(/github\.com[/:](.*?)\/(.+?)(\.git)?$/);
+                if (match) {
+                    config.display_name = `${match[1]}/${match[2]}`;
+                }
+            }
+        } else {
+            // Fallback to main config.json (existing behavior)
+            if (!config.repo_url || !config.github_token || !config.branch) {
+                console.log('[cloud-saves] 自动配置跳过：GIT_CONFIG_PATH 无效且主配置中缺少必要的配置项');
+                return;
+            }
+        }
+        
+        // Check if already authorized
+        if (config.is_authorized) {
+            console.log('[cloud-saves] 自动配置跳过：已经授权');
+            return;
+        }
+
+        console.log(`[cloud-saves] 发现配置：repo_url=${config.repo_url}, branch=${config.branch || DEFAULT_BRANCH}`);
+        console.log('[cloud-saves] 开始自动配置过程...');
+        
+        // Initialize Git repository if needed
+        const initResult = await initGitRepo();
+        if (!initResult.success) {
+            console.error('[cloud-saves] 自动配置失败：Git仓库初始化失败', initResult.message);
+            return;
+        }
+        
+        // Configure remote
+        const configResult = await configureRemote(config.repo_url);
+        if (!configResult.success) {
+            console.error('[cloud-saves] 自动配置失败：远程仓库配置失败', configResult.message);
+            return;
+        }
+        
+        // Test the connection by trying to fetch and validate branch
+        try {
+            const git = await getGitInstance();
+            console.log('[cloud-saves] 测试远程连接...');
+            
+            // Set up local Git identity for commits
+            try {
+                console.log('[cloud-saves] 配置本地Git身份...');
+                await git.addConfig('user.name', 'Cloud Saves Plugin', false, 'local');
+                await git.addConfig('user.email', 'cloud-saves@plugin.local', false, 'local');
+                console.log('[cloud-saves] 本地Git身份已配置');
+            } catch (configError) {
+                console.warn('[cloud-saves] 配置本地Git身份失败:', configError.message);
+            }
+            
+            await git.fetch(['origin', '--tags', '--prune', '--force']);
+            console.log('[cloud-saves] 远程连接测试成功');
+            
+            // Validate target branch exists
+            const targetBranch = config.branch || DEFAULT_BRANCH;
+            console.log(`[cloud-saves] 检查远程分支 ${targetBranch}...`);
+            
+            let remoteBranchExists = false;
+            try {
+                const remoteHeads = await git.listRemote(['--heads', 'origin', targetBranch]);
+                remoteBranchExists = typeof remoteHeads === 'string' && remoteHeads.includes(`refs/heads/${targetBranch}`);
+            } catch (lsRemoteError) {
+                console.warn(`[cloud-saves] 检查分支 ${targetBranch} 失败，假设其不存在。错误:`, lsRemoteError.message);
+                remoteBranchExists = false;
+            }
+            
+            if (!remoteBranchExists) {
+                console.log(`[cloud-saves] 远程分支 ${targetBranch} 不存在，将在首次推送时创建`);
+            } else {
+                console.log(`[cloud-saves] 远程分支 ${targetBranch} 存在`);
+            }
+            
+            // Try to get GitHub username for better tracking
+            try {
+                const validationResponse = await fetch('https://api.github.com/user', {
+                    headers: { 'Authorization': `token ${config.github_token}` }
+                });
+                if (validationResponse.ok) {
+                    const userData = await validationResponse.json();
+                    config.username = userData.login || null;
+                    console.log(`[cloud-saves] GitHub用户身份: ${config.username}`);
+                } else {
+                    console.warn(`[cloud-saves] 获取GitHub用户名失败: ${validationResponse.status}`);
+                }
+            } catch (fetchUserError) {
+                console.warn('[cloud-saves] 获取GitHub用户名时发生网络错误:', fetchUserError.message);
+            }
+            
+            // Mark as authorized
+            config.is_authorized = true;
+            await saveConfig(config);
+            
+            console.log('[cloud-saves] ✅ 自动配置完成！远程仓库已成功配置并授权');
+            
+            // Setup auto-save timer if configured
+            setupBackendAutoSaveTimer();
+            
+        } catch (fetchError) {
+            console.error('[cloud-saves] 自动配置失败：无法连接到远程仓库', fetchError.message);
+            console.log('[cloud-saves] 这可能是由于：网络问题、权限不足、仓库不存在或访问令牌无效');
+            console.log('[cloud-saves] 请检查config.json中的repo_url和github_token是否正确');
+        }
+        
+    } catch (error) {
+        console.error('[cloud-saves] 自动配置过程中发生错误:', error.message);
+    }
+}
+
 async function init(router) {
     console.log('[cloud-saves] 初始化云存档插件 (simple-git)...');
     console.log('[cloud-saves] 插件 UI 访问地址 (如果端口不是8000请自行修改): http://127.0.0.1:8000/api/plugins/cloud-saves/ui');
+    console.log('[cloud-saves] 💡 提示：如需自动配置，请在 GIT_CONFIG_PATH 或 config.json 中设置 repo_url、github_token 和 branch');
+    console.log(`[cloud-saves] 💡 GIT_CONFIG_PATH: ${GIT_CONFIG_PATH}`);
 
     try {
+        // Check for auto-configuration during init
+        await checkAndAutoConfigureRemote();
+
         router.use('/static', express.static(path.join(__dirname, 'public')));
         router.use(express.json());
         router.get('/ui', (req, res) => {

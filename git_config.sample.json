@@ -1,0 +1,5 @@
+{
+  "repo_url": "https://github.com/your-username/your-repo-name.git",
+  "github_token": "ghp_your_github_personal_access_token_here",
+  "branch": "main"
+} 
