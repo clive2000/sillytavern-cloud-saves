@@ -1139,6 +1139,10 @@ async function checkAndAutoConfigureRemote() {
                     config.display_name = `${match[1]}/${match[2]}`;
                 }
             }
+            
+            // Save the merged config so getGitInstance() can access the credentials
+            await saveConfig(config);
+            console.log('[cloud-saves] Git 配置已保存到主配置文件');
         } else {
             // Fallback to main config.json (existing behavior)
             if (!config.repo_url || !config.github_token || !config.branch) {
@@ -1266,6 +1270,7 @@ async function init(router) {
         router.get('/config', async (req, res) => {
             try {
                 const config = await readConfig();
+                const gitConfig = await readGitConfig();
                 const safeConfig = {
                     repo_url: config.repo_url || '',
                     display_name: config.display_name || '',
