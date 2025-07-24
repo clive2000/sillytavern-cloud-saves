@@ -45,7 +45,7 @@ const info = {
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const DATA_DIR = path.join(process.cwd(), 'data');
-const GIT_CONFIG_PATH = path.join(process.cwd(), '.git', 'git_autosave_config.json');
+const GIT_CONFIG_PATH = path.join(process.cwd(), 'git_autosave_config.json');
 const DEFAULT_BRANCH = 'main';
 
 const DEFAULT_CONFIG = {
